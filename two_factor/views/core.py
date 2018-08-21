@@ -113,7 +113,7 @@ class LoginView(IdempotentSessionWizardView):
         user = self.get_user()
         if not self.token_required(self.request):
             user.otp_device = self.get_device()
-            user.otp_device.token_step_skipped = True
+            # user.otp_device.token_step_skipped = True
         login(self.request, user)
 
         redirect_to = self.request.POST.get(
