@@ -1,13 +1,16 @@
 # -*- coding: utf-8 -*-
 
 from django.conf import settings
+from django.core import mail
 from django.shortcuts import resolve_url
-from django.test import TestCase
+from django.test import TestCase, TransactionTestCase
 from django.test.utils import override_settings
 from django.urls import reverse
 from django_otp import DEVICE_ID_SESSION_KEY
 from django_otp.oath import totp
 from django_otp.util import random_hex
+
+from two_factor.models import TrustedAgent
 
 from .utils import UserMixin
 
@@ -19,7 +22,7 @@ except ImportError:
 USER_AGENT = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/68.0.3440.84 Safari/537.36'
 
 
-class LoginTest(UserMixin, TestCase):
+class LoginTest(UserMixin, TransactionTestCase):
     def _post(self, data=None):
         return self.client.post(reverse('two_factor:login'), data=data, HTTP_USER_AGENT=USER_AGENT)
 
@@ -34,7 +37,7 @@ class LoginTest(UserMixin, TestCase):
         self.assertContains(response, 'Please enter a correct')
         self.assertContains(response, 'and password.')
 
-    @mock.patch('two_factor.views.core.signals.user_verified.send')
+    @mock.patch('two_factor.signals.user_verified.send')
     def test_valid_login(self, mock_signal):
         self.create_user()
         response = self._post({'auth-username': 'bouke@example.com',
@@ -74,7 +77,7 @@ class LoginTest(UserMixin, TestCase):
              'login_view-current_step': 'auth'})
         self.assertRedirects(response, redirect_url)
 
-    @mock.patch('two_factor.views.core.signals.user_verified.send')
+    @mock.patch('two_factor.signals.user_verified.send')
     def test_with_generator(self, mock_signal):
         user = self.create_user()
         device = user.totpdevice_set.create(name='default',
@@ -102,7 +105,7 @@ class LoginTest(UserMixin, TestCase):
         mock_signal.assert_called_with(sender=mock.ANY, request=mock.ANY, user=user, device=device)
 
     @mock.patch('two_factor.gateways.fake.Fake')
-    @mock.patch('two_factor.views.core.signals.user_verified.send')
+    @mock.patch('two_factor.signals.user_verified.send')
     @override_settings(
         TWO_FACTOR_SMS_GATEWAY='two_factor.gateways.fake.Fake',
         TWO_FACTOR_CALL_GATEWAY='two_factor.gateways.fake.Fake',
@@ -111,7 +114,7 @@ class LoginTest(UserMixin, TestCase):
         user = self.create_user()
         no_digits = 6
         for instruct in ('initial_login', 'skip_token_login', 'bad_signature',
-                         'setup_sign_expired', 'signature_expired'):
+                         'setup_sign_expired', 'signature_expired', 'skip_token_login', 'missing_trusted_agent'):
             user.totpdevice_set.create(name='default', key=random_hex().decode(),
                                        digits=no_digits)
             device = user.phonedevice_set.create(name='backup', number='+31101234567',
@@ -125,6 +128,9 @@ class LoginTest(UserMixin, TestCase):
             if instruct == 'bad_signature':  # corrupt cookie
                 self.client.cookies['rememberdevice'].set('rememberdevice', instruct + ':' + instruct,
                                                           instruct + ':' + instruct)
+            if instruct == 'missing_trusted_agent':
+                TrustedAgent.objects.filter(user_id=user.id).delete()
+
             # Backup phones should be listed on the login form
             response = self._post({'auth-username': 'bouke@example.com',
                                    'auth-password': 'secret',
@@ -147,11 +153,21 @@ class LoginTest(UserMixin, TestCase):
                     response = self._post({'token-otp_token': totp(device.bin_key),
                                            'login_view-current_step': 'token',
                                            'token-remember': 'on'})
+            elif instruct in ['initial_login']:
+                with override_settings(TWO_FACTOR_NEW_DEV_ALERTS=False):
+                    response = self._post({'token-otp_token': totp(device.bin_key),
+                                           'login_view-current_step': 'token',
+                                           'token-remember': 'on'})
+                    self.assertTrue(len(mail.outbox) == 0)
             else:
                 # Valid token should be accepted.
                 response = self._post({'token-otp_token': totp(device.bin_key),
                                        'login_view-current_step': 'token',
                                        'token-remember': 'on'})
+
+            if instruct in ['missing_trusted_agent']:
+                self.assertEqual(mail.outbox[0].subject, 'New sign in to your account')
+
             self.assertRedirects(response, resolve_url(settings.LOGIN_REDIRECT_URL))
             self.assertEqual(device.persistent_id,
                              self.client.session.get(DEVICE_ID_SESSION_KEY))
@@ -190,7 +206,7 @@ class LoginTest(UserMixin, TestCase):
             token=str(totp(device.bin_key, digits=no_digits)).zfill(no_digits))
 
     @mock.patch('two_factor.gateways.fake.Fake')
-    @mock.patch('two_factor.views.core.signals.user_verified.send')
+    @mock.patch('two_factor.signals.user_verified.send')
     @override_settings(
         TWO_FACTOR_SMS_GATEWAY='two_factor.gateways.fake.Fake',
         TWO_FACTOR_CALL_GATEWAY='two_factor.gateways.fake.Fake',
@@ -223,7 +239,7 @@ class LoginTest(UserMixin, TestCase):
             # Check that the signal was fired.
             mock_signal.assert_called_with(sender=mock.ANY, request=mock.ANY, user=user, device=device)
 
-    @mock.patch('two_factor.views.core.signals.user_verified.send')
+    @mock.patch('two_factor.signals.user_verified.send')
     def test_with_backup_token(self, mock_signal):
         user = self.create_user()
         user.totpdevice_set.create(name='default', key=random_hex().decode())
