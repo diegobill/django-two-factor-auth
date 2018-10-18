@@ -95,7 +95,7 @@ class TOTPDeviceForm(forms.Form):
     def __init__(self, key, user, metadata=None, **kwargs):
         super(TOTPDeviceForm, self).__init__(**kwargs)
         self.key = key
-        self.tolerance = 1
+        self.tolerance = getattr(settings, 'TWO_FACTOR_TOLERANCE', 1)
         self.t0 = 0
         self.step = 30
         self.drift = 0
